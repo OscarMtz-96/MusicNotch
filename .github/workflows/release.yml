@@ -28,7 +28,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/Music Visualizer.dmg
+          files: "dist/Music Visualizer.dmg"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
