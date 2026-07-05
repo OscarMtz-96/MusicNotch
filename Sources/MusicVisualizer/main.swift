@@ -452,6 +452,16 @@ struct VisualizerView: View {
             )
                 .stroke(.white.opacity(model.state.isExpanded ? 0.06 : 0.03), lineWidth: 1)
         )
+        .overlay(alignment: .topLeading) {
+            if model.state.isExpanded {
+                CloseButton {
+                    NSApp.terminate(nil)
+                }
+                .padding(.top, 14)
+                .padding(.leading, 34)
+                .transition(.opacity.combined(with: .scale(scale: 0.88)))
+            }
+        }
         .contentShape(Rectangle())
         .onHover { model.setHovered($0) }
         .frame(width: model.windowSize.width, height: model.windowSize.height, alignment: .top)
@@ -749,6 +759,29 @@ struct ControlButtonStyle: ButtonStyle {
             .scaleEffect(configuration.isPressed ? 0.82 : didPress ? 1.16 : isHovered ? 1.1 : 1)
             .shadow(color: .white.opacity(isActive ? 0.18 : 0), radius: 8)
             .animation(.spring(response: 0.18, dampingFraction: 0.55), value: configuration.isPressed)
+    }
+}
+
+struct CloseButton: View {
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(Color(red: 1.0, green: 0.36, blue: 0.30))
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.black.opacity(isHovered ? 0.78 : 0))
+            }
+            .frame(width: 15, height: 15)
+            .scaleEffect(isHovered ? 1.08 : 1)
+            .shadow(color: .black.opacity(0.25), radius: 5, y: 2)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .animation(.spring(response: 0.18, dampingFraction: 0.7), value: isHovered)
     }
 }
 
