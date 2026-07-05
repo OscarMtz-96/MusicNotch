@@ -4,7 +4,15 @@ on:
   push:
     tags:
       - "v*"
+      - "[0-9]*"
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to attach the DMG to, for example 0.1.1"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -24,15 +32,33 @@ jobs:
       - name: Package DMG
         run: ./scripts/package-dmg.sh
 
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ -n "$RELEASE_TAG" ]; then
+            echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          elif [ -n "$DISPATCH_TAG" ]; then
+            echo "tag=$DISPATCH_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload release asset
-        if: startsWith(github.ref, 'refs/tags/')
+        if: steps.release.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.release.outputs.tag }}
           files: "dist/Music Visualizer.dmg"
+          fail_on_unmatched_files: true
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: Music Visualizer.dmg
           path: dist/Music Visualizer.dmg
-
