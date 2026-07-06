@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import MediaRemoteAdapter
 import MusicVisualizerCore
 import SwiftUI
@@ -149,6 +150,84 @@ struct NotchMetrics {
     }
 }
 
+struct SystemMonitorSnapshot {
+    var cpuUsage: Double = 0
+    var memoryUsedBytes: UInt64 = 0
+    var memoryTotalBytes: UInt64 = 0
+
+    var memoryUsage: Double {
+        guard memoryTotalBytes > 0 else { return 0 }
+        return Double(memoryUsedBytes) / Double(memoryTotalBytes)
+    }
+
+    var cpuText: String {
+        "\(Int(cpuUsage.rounded()))%"
+    }
+
+    var memoryText: String {
+        String(format: "%.1f GB", Double(memoryUsedBytes) / 1_073_741_824)
+    }
+}
+
+final class SystemMonitorSampler {
+    private var previousCPU: host_cpu_load_info_data_t?
+
+    func sample() -> SystemMonitorSnapshot {
+        let memory = memoryUsage()
+        return SystemMonitorSnapshot(
+            cpuUsage: cpuUsage(),
+            memoryUsedBytes: memory.used,
+            memoryTotalBytes: memory.total
+        )
+    }
+
+    private func cpuUsage() -> Double {
+        var load = host_cpu_load_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info_data_t>.stride / MemoryLayout<integer_t>.stride)
+        let result = withUnsafeMutablePointer(to: &load) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return 0 }
+        defer { previousCPU = load }
+        guard let previousCPU else { return 0 }
+
+        let previousActive = previousCPU.cpu_ticks.0 + previousCPU.cpu_ticks.1 + previousCPU.cpu_ticks.3
+        let currentActive = load.cpu_ticks.0 + load.cpu_ticks.1 + load.cpu_ticks.3
+        let previousTotal = previousActive + previousCPU.cpu_ticks.2
+        let currentTotal = currentActive + load.cpu_ticks.2
+        let totalDelta = currentTotal - previousTotal
+        guard totalDelta > 0 else { return 0 }
+
+        return Double(currentActive - previousActive) / Double(totalDelta) * 100
+    }
+
+    private func memoryUsage() -> (used: UInt64, total: UInt64) {
+        var stats = vm_statistics64_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.stride / MemoryLayout<integer_t>.stride)
+        let result = withUnsafeMutablePointer(to: &stats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return (0, totalMemoryBytes()) }
+
+        var pageSize: vm_size_t = 0
+        host_page_size(mach_host_self(), &pageSize)
+        let total = totalMemoryBytes()
+        let free = UInt64(stats.free_count + stats.speculative_count) * UInt64(pageSize)
+        return (total > free ? total - free : 0, total)
+    }
+
+    private func totalMemoryBytes() -> UInt64 {
+        var total: UInt64 = 0
+        var size = MemoryLayout<UInt64>.stride
+        sysctlbyname("hw.memsize", &total, &size, nil, 0)
+        return total
+    }
+}
+
 @MainActor
 final class VisualizerModel: NSObject, ObservableObject {
     @Published var state = TrackState()
@@ -157,9 +236,11 @@ final class VisualizerModel: NSObject, ObservableObject {
     @Published var artwork: NSImage?
     @Published var elapsedSeconds: Double = 0
     @Published var durationSeconds: Double = 0
+    @Published var systemMonitorSnapshot = SystemMonitorSnapshot()
     @Published var systemMonitorEnabled = UserDefaults.standard.bool(forKey: "macResourceMonitorEnabled") {
         didSet {
             UserDefaults.standard.set(systemMonitorEnabled, forKey: "macResourceMonitorEnabled")
+            updateSystemMonitorTimer()
         }
     }
 
@@ -167,10 +248,12 @@ final class VisualizerModel: NSObject, ObservableObject {
     var openSettings: (() -> Void)?
     private var timer: Timer?
     private var mediaTimer: Timer?
+    private var systemMonitorTimer: Timer?
     private var collapseTimer: Timer?
     private var isPointerInside = false
     private var isSeeking = false
     private let mediaController = MediaController()
+    private let systemMonitorSampler = SystemMonitorSampler()
     private var isPackagedApp: Bool {
         Bundle.main.bundlePath.hasSuffix(".app")
     }
@@ -206,6 +289,7 @@ final class VisualizerModel: NSObject, ObservableObject {
             userInfo: nil,
             repeats: true
         )
+        updateSystemMonitorTimer()
     }
 
     func startMediaUpdates() {
@@ -250,6 +334,27 @@ final class VisualizerModel: NSObject, ObservableObject {
         if !isSeeking, durationSeconds > 0 {
             elapsedSeconds = min(durationSeconds, elapsedSeconds + 0.14)
         }
+    }
+
+    private func updateSystemMonitorTimer() {
+        systemMonitorTimer?.invalidate()
+        systemMonitorTimer = nil
+        guard systemMonitorEnabled else { return }
+
+        refreshSystemMonitor()
+        let timer = Timer(
+            timeInterval: 1,
+            target: self,
+            selector: #selector(refreshSystemMonitor),
+            userInfo: nil,
+            repeats: true
+        )
+        RunLoop.main.add(timer, forMode: .common)
+        systemMonitorTimer = timer
+    }
+
+    @objc private func refreshSystemMonitor() {
+        systemMonitorSnapshot = systemMonitorSampler.sample()
     }
 
     func setHovered(_ hovered: Bool) {
@@ -528,7 +633,7 @@ struct VisualizerView: View {
                 if model.systemMonitorEnabled {
                     Divider()
                         .overlay(.white.opacity(0.14))
-                    SystemMonitorMockup()
+                    SystemMonitorView(snapshot: model.systemMonitorSnapshot)
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
@@ -821,14 +926,18 @@ struct ControlButtonStyle: ButtonStyle {
     }
 }
 
-struct SystemMonitorMockup: View {
-    private let metrics = [
-        ("cpu", "CPU", "28%", 0.28),
-        ("memorychip", "RAM", "11.6 GB", 0.58),
-        ("thermometer.medium", "TEMP", "48 C", 0.42),
-        ("display", "GPU", "N/A", 0.0),
-        ("fan", "FAN", "0 RPM", 0.0)
-    ]
+struct SystemMonitorView: View {
+    let snapshot: SystemMonitorSnapshot
+
+    private var metrics: [(String, String, String, Double)] {
+        [
+            ("cpu", "CPU", snapshot.cpuText, snapshot.cpuUsage / 100),
+            ("memorychip", "RAM", snapshot.memoryText, snapshot.memoryUsage),
+            ("thermometer.medium", "TEMP", "N/A", 0),
+            ("display", "GPU", "N/A", 0),
+            ("fan", "FAN", "N/A", 0)
+        ]
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -837,7 +946,7 @@ struct SystemMonitorMockup: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.82))
                 Spacer()
-                Text("Mockup")
+                Text("Live")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.white.opacity(0.38))
             }
