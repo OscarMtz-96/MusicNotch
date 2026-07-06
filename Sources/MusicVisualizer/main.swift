@@ -6,6 +6,7 @@ import SwiftUI
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: NSPanel?
+    private var settingsWindow: NSWindow?
     private var model = VisualizerModel()
     private var hoverTimer: Timer?
 
@@ -16,6 +17,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showPanel() {
         model.notch = NotchMetrics(screen: NSScreen.main)
+        model.openSettings = { [weak self] in
+            self?.showSettingsWindow()
+        }
         let size = model.windowSize
         let frame = centeredTopFrame(size: size)
         model.windowFrame = frame
@@ -63,6 +67,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let panel else { return }
         let shouldReceiveMouse = model.updatePointer(at: NSEvent.mouseLocation)
         panel.ignoresMouseEvents = !shouldReceiveMouse
+    }
+
+    private func showSettingsWindow() {
+        if let settingsWindow {
+            settingsWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let settingsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 340, height: 190),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        settingsWindow.title = "Settings"
+        settingsWindow.isReleasedWhenClosed = false
+        settingsWindow.center()
+        settingsWindow.contentView = NSHostingView(rootView: SettingsView(model: model))
+        settingsWindow.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        self.settingsWindow = settingsWindow
     }
 }
 
@@ -131,8 +157,14 @@ final class VisualizerModel: NSObject, ObservableObject {
     @Published var artwork: NSImage?
     @Published var elapsedSeconds: Double = 0
     @Published var durationSeconds: Double = 0
+    @Published var systemMonitorEnabled = UserDefaults.standard.bool(forKey: "macResourceMonitorEnabled") {
+        didSet {
+            UserDefaults.standard.set(systemMonitorEnabled, forKey: "macResourceMonitorEnabled")
+        }
+    }
 
     var windowFrame: NSRect = .zero
+    var openSettings: (() -> Void)?
     private var timer: Timer?
     private var mediaTimer: Timer?
     private var collapseTimer: Timer?
@@ -158,11 +190,11 @@ final class VisualizerModel: NSObject, ObservableObject {
     }
 
     private var expandedVisualSize: NSSize {
-        NSSize(width: max(540, notch.width + 340), height: 190)
+        NSSize(width: max(540, notch.width + 340), height: systemMonitorEnabled ? 352 : 190)
     }
 
     private var expandedWindowSize: NSSize {
-        NSSize(width: expandedVisualSize.width + 32, height: expandedVisualSize.height + 24)
+        NSSize(width: expandedVisualSize.width + 32, height: 386)
     }
 
     override init() {
@@ -288,6 +320,10 @@ final class VisualizerModel: NSObject, ObservableObject {
         sendMediaCommand(["next_track"]) {
             mediaController.nextTrack()
         }
+    }
+
+    func showSettings() {
+        openSettings?()
     }
 
     func scrub(to fraction: Double, isFinal: Bool) {
@@ -425,8 +461,8 @@ struct VisualizerView: View {
         .padding(.leading, model.state.isExpanded ? 36 : 16)
         .padding(.trailing, model.state.isExpanded ? 36 : 18)
         .padding(.top, model.state.isExpanded ? 36 : 3)
-        .padding(.bottom, model.state.isExpanded ? 22 : 3)
-        .frame(width: model.visualSize.width, height: model.visualSize.height)
+        .padding(.bottom, model.state.isExpanded ? (model.systemMonitorEnabled ? 40 : 22) : 3)
+        .frame(width: model.visualSize.width, height: model.visualSize.height, alignment: .top)
         .background(
             ZStack {
                 Color.black
@@ -462,6 +498,16 @@ struct VisualizerView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.88)))
             }
         }
+        .overlay(alignment: .topTrailing) {
+            if model.state.isExpanded {
+                IconButton(systemName: "gearshape.fill") {
+                    model.showSettings()
+                }
+                .padding(.top, 12)
+                .padding(.trailing, 34)
+                .transition(.opacity.combined(with: .scale(scale: 0.88)))
+            }
+        }
         .contentShape(Rectangle())
         .onHover { model.setHovered($0) }
         .frame(width: model.windowSize.width, height: model.windowSize.height, alignment: .top)
@@ -476,31 +522,17 @@ struct VisualizerView: View {
     @ViewBuilder
     private var content: some View {
         if model.state.isExpanded {
-            HStack(alignment: .center, spacing: 24) {
-                AlbumArt(size: 104, image: model.artwork)
-                    .matchedGeometryEffect(id: "art", in: islandAnimation)
+            VStack(alignment: .leading, spacing: model.systemMonitorEnabled ? 22 : 16) {
+                expandedPlayer
 
-                VStack(alignment: .leading, spacing: 14) {
-                    expandedTrackText
-                    ProgressScrubber(
-                        elapsed: model.elapsedSeconds,
-                        duration: model.durationSeconds
-                    ) { fraction, isFinal in
-                        model.scrub(to: fraction, isFinal: isFinal)
-                    }
-                    .frame(height: 24)
-
-                    HStack(alignment: .center, spacing: 28) {
-                        expandedControls
-                        Spacer(minLength: 8)
-                        MiniBars(levels: model.levels)
-                            .matchedGeometryEffect(id: "bars", in: islandAnimation)
-                            .frame(width: 58, height: 24)
-                    }
+                if model.systemMonitorEnabled {
+                    Divider()
+                        .overlay(.white.opacity(0.14))
+                    SystemMonitorMockup()
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
             }
+            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
         } else {
             HStack(spacing: 0) {
                 AlbumArt(size: 22, image: model.artwork)
@@ -514,6 +546,33 @@ struct VisualizerView: View {
                     .frame(width: 24, height: 12)
             }
             .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: .top)))
+        }
+    }
+
+    private var expandedPlayer: some View {
+        HStack(alignment: .center, spacing: 24) {
+            AlbumArt(size: 104, image: model.artwork)
+                .matchedGeometryEffect(id: "art", in: islandAnimation)
+
+            VStack(alignment: .leading, spacing: 14) {
+                expandedTrackText
+                ProgressScrubber(
+                    elapsed: model.elapsedSeconds,
+                    duration: model.durationSeconds
+                ) { fraction, isFinal in
+                    model.scrub(to: fraction, isFinal: isFinal)
+                }
+                .frame(height: 24)
+
+                HStack(alignment: .center, spacing: 28) {
+                    expandedControls
+                    Spacer(minLength: 8)
+                    MiniBars(levels: model.levels)
+                        .matchedGeometryEffect(id: "bars", in: islandAnimation)
+                        .frame(width: 58, height: 24)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -759,6 +818,124 @@ struct ControlButtonStyle: ButtonStyle {
             .scaleEffect(configuration.isPressed ? 0.82 : didPress ? 1.16 : isHovered ? 1.1 : 1)
             .shadow(color: .white.opacity(isActive ? 0.18 : 0), radius: 8)
             .animation(.spring(response: 0.18, dampingFraction: 0.55), value: configuration.isPressed)
+    }
+}
+
+struct SystemMonitorMockup: View {
+    private let metrics = [
+        ("cpu", "CPU", "28%", 0.28),
+        ("memorychip", "RAM", "11.6 GB", 0.58),
+        ("thermometer.medium", "TEMP", "48 C", 0.42),
+        ("display", "GPU", "N/A", 0.0),
+        ("fan", "FAN", "0 RPM", 0.0)
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("System Monitor")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.82))
+                Spacer()
+                Text("Mockup")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.38))
+            }
+
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 5), spacing: 0) {
+                ForEach(metrics, id: \.1) { metric in
+                    SystemMetricTile(
+                        systemName: metric.0,
+                        title: metric.1,
+                        value: metric.2,
+                        progress: metric.3
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, 4)
+        }
+    }
+}
+
+struct SystemMetricTile: View {
+    let systemName: String
+    let title: String
+    let value: String
+    let progress: Double
+
+    var body: some View {
+        VStack(alignment: .center, spacing: 7) {
+            Image(systemName: systemName)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.72))
+
+            Text(title)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.white.opacity(0.36))
+
+            Text(value)
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.86))
+                .lineLimit(1)
+
+            Capsule()
+                .fill(.white.opacity(0.14))
+                .frame(height: 4)
+                .overlay(alignment: .leading) {
+                    Capsule()
+                        .fill(Color(red: 0.23, green: 0.55, blue: 1.0).opacity(progress > 0 ? 1 : 0))
+                        .frame(width: 48 * progress, height: 4)
+                }
+                .frame(width: 48)
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+}
+
+struct IconButton: View {
+    let systemName: String
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(isHovered ? 0.95 : 0.62))
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(.white.opacity(isHovered ? 0.14 : 0.06)))
+        }
+        .buttonStyle(.plain)
+        .help("Settings")
+        .onHover { isHovered = $0 }
+        .animation(.spring(response: 0.18, dampingFraction: 0.72), value: isHovered)
+    }
+}
+
+struct SettingsView: View {
+    @ObservedObject var model: VisualizerModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Settings")
+                .font(.system(size: 20, weight: .semibold))
+
+            Toggle("Mac resource monitor", isOn: $model.systemMonitorEnabled)
+                .toggleStyle(.checkbox)
+
+            Text("CPU, temperature, RAM, GPU and fan speed monitoring.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+
+            Spacer()
+
+            Text("More features to come...")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(22)
+        .frame(width: 340, height: 190, alignment: .topLeading)
     }
 }
 
